@@ -46,7 +46,8 @@
               ];
               postInstall = ''
                 mkdir $tree_sitter
-                cp -R tree-sitter $tree_sitter/supermd
+                cp -R tree-sitter/supermd $tree_sitter/supermd
+                cp -R tree-sitter/supermd-inline $tree_sitter/supermd_inline
               '';
             };
         };
