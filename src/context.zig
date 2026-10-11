@@ -16,8 +16,8 @@ pub const Content = struct {
     code: Directive = .{ .kind = .{ .code = .{} } },
     image: Directive = .{ .kind = .{ .image = .{} } },
     video: Directive = .{ .kind = .{ .video = .{} } },
+    audio: Directive = .{ .kind = .{ .audio = .{} } },
 
-    pub const dot = scripty.defaultDot(Content, Value, true);
     pub const description =
         \\The Scripty global scope in SuperMD gives you access to various
         \\rendering directives. Rendering directives allow you to define
@@ -34,12 +34,15 @@ pub const Content = struct {
         pub const code = Code.description;
         pub const image = Image.description;
         pub const video = Video.description;
+        pub const audio = Audio.description;
     };
+
     pub const Builtins = struct {};
+    pub const Dot = true;
 };
 
 pub const Value = union(enum) {
-    content: *Content,
+    root: *Content,
     directive: *Directive,
 
     // Primitive values
@@ -57,11 +60,15 @@ pub const Value = union(enum) {
         return .{ .string = s };
     }
 
-    pub fn fromNumberLiteral(bytes: []const u8) Value {
+    pub fn fromIntegerLiteral(bytes: []const u8) Value {
         const num = std.fmt.parseInt(i64, bytes, 10) catch {
             return .{ .err = "error parsing numeric literal" };
         };
         return .{ .int = num };
+    }
+    pub fn fromFloatLiteral(bytes: []const u8) Value {
+        _ = bytes;
+        return .{ .err = "floats are not supported" };
     }
 
     pub fn fromBooleanLiteral(b: bool) Value {
@@ -71,7 +78,7 @@ pub const Value = union(enum) {
     pub fn from(gpa: Allocator, v: anytype) !Value {
         _ = gpa;
         return switch (@TypeOf(v)) {
-            *Content => .{ .content = v },
+            *Content => .{ .root = v },
             *Directive => .{ .directive = v },
             []const u8 => .{ .string = v },
             bool => .{ .bool = v },
@@ -80,56 +87,24 @@ pub const Value = union(enum) {
             else => @compileError("TODO: implement Value.from for " ++ @typeName(@TypeOf(v))),
         };
     }
-
-    pub fn dot(
-        self: *Value,
-        gpa: Allocator,
-        path: []const u8,
-    ) error{OutOfMemory}!Value {
-        switch (self.*) {
-            .content => |c| return c.dot(gpa, path),
-            .directive => return .{ .err = "field access on directive" },
-            else => return .{ .err = "field access on primitive value" },
-        }
-    }
-
-    pub const call = scripty.defaultCall(Value, Content);
-
-    pub fn builtinsFor(
-        comptime tag: @typeInfo(Value).@"union".tag_type.?,
-    ) type {
-        const f = std.meta.fieldInfo(Value, tag);
-        switch (@typeInfo(f.type)) {
-            .pointer => |ptr| {
-                if (@typeInfo(ptr.child) == .@"struct") {
-                    return @field(ptr.child, "Builtins");
-                }
-            },
-            .@"struct" => {
-                return @field(f.type, "Builtins");
-            },
-            else => {},
-        }
-
-        return struct {};
-    }
 };
 
 pub const Directive = struct {
     id: ?[]const u8 = null,
     attrs: ?[][]const u8 = null,
     title: ?[]const u8 = null,
-    data: Data = .{},
+    data: Data = .empty,
 
     kind: Kind,
 
-    pub const Data = ziggy.dynamic.Map(ziggy.dynamic.Value);
+    pub const Data = ziggy.Dictionary(ziggy.Dynamic);
     pub const Kind = union(enum) {
         section: Section,
         block: Block,
         heading: Heading,
         image: Image,
         video: Video,
+        audio: Audio,
         link: Link,
         code: Code,
         text: Text,
@@ -283,10 +258,10 @@ pub const Directive = struct {
             pub const description =
                 \\Adds data key-value pairs of a Directive.
                 \\
-                \\In SuperHTML data key-value pairs can be accessed 
+                \\In SuperHTML data key-value pairs can be accessed
                 \\programmatically in a template when rendering
                 \\a section, while data will turn into `data-foo`
-                \\attributes otherwise. 
+                \\attributes otherwise.
             ;
 
             pub fn call(
@@ -304,7 +279,7 @@ pub const Directive = struct {
                     .err = "field already set",
                 };
 
-                var new: Data = .{};
+                var new: Data = .empty;
                 var idx: usize = 0;
                 while (idx < args.len) {
                     const key = switch (args[idx]) {
@@ -343,10 +318,10 @@ pub const Section = struct {
 
     pub const description =
         \\A content section, used to define a portion of content
-        \\that can be rendered individually by a template. 
+        \\that can be rendered individually by a template.
     ;
 
-    pub fn validate(gpa: Allocator, d: *Directive, ctx: Node) !?Value {
+    pub fn validate(gpa: Allocator, _: *Directive, ctx: Node) !?Value {
         const parent = ctx.parent().?;
 
         // A section must be placed either:
@@ -385,27 +360,9 @@ pub const Section = struct {
                 .err = "sections must be top level elements or be embedded in headings",
             },
         }
-
-        // End sections additionally cannot have any other property set
-        if (d.kind.section.end != null) {
-            if (d.id != null or d.attrs != null) {
-                return .{
-                    .err = "end section directive cannot have any other property set",
-                };
-            }
-        }
         return null;
     }
-    pub const Builtins = struct {
-        // pub const end = utils.directiveBuiltin("end", .bool,
-        //     \\Calling this function makes this section directive
-        //     \\terminate a previous section without opening a new
-        //     \\one.
-        //     \\
-        //     \\An end section directive cannot have any other
-        //     \\property set.
-        // );
-    };
+    pub const Builtins = struct {};
 };
 
 pub const Text = struct {
@@ -415,7 +372,7 @@ pub const Text = struct {
         \\
         \\Example:
         \\```markdown
-        \\Hello [World]($text.id('foo').attrs('bar', 'baz'))!
+        \\Hello [World]($text.id('foo').attrs('bar','baz'))!
         \\```
         \\
         \\This will be rendered by SuperHTML as:
@@ -448,7 +405,7 @@ pub const Mathtex = struct {
         \\collisions with other SuperMD syntax.
         \\
         \\This JS based solution is temporary. Zine will eventually implement
-        \\its own way of outputting MathML at buildtime so that clients won't 
+        \\its own way of outputting MathML at buildtime so that clients won't
         \\need to have JS enabled.
         \\
         \\To render math formulas as separate blocks, use this syntax:
@@ -459,7 +416,7 @@ pub const Mathtex = struct {
         \\
         \\Example:
         \\```markdown
-        \\Here's some [`x+\sqrt{1-x^2}`]($mathtex) math. 
+        \\Here's some [`x+\sqrt{1-x^2}`]($mathtex) math.
         \\```
         \\
         \\This will be rendered by SuperHTML as:
@@ -497,7 +454,7 @@ pub const Heading = struct {
         \\
         \\Example:
         \\```markdown
-        \\# [Title]($heading.id('foo').attrs('bar', 'baz'))
+        \\# [Title]($heading.id('foo').attrs('bar','baz'))
         \\```
         \\
         \\This will be rendered by SuperHTML as:
@@ -532,10 +489,10 @@ pub const Block = struct {
     };
 
     pub const description =
-        \\When placed at the beginning of a Markdown quote block, the quote 
+        \\When placed at the beginning of a Markdown quote block, the quote
         \\block becomes a styleable container for elements.
         \\
-        \\SuperHTML will automatically give the class `block` when rendering 
+        \\SuperHTML will automatically give the class `block` when rendering
         \\Block directives.
         \\
         \\Example:
@@ -549,7 +506,7 @@ pub const Block = struct {
         \\>This is now a block.
         \\>Lorem ipsum.
         \\
-        \\Differently from Sections, Blocks cannot be rendered independently 
+        \\Differently from Sections, Blocks cannot be rendered independently
         \\and can be nested.
         \\
         \\Example:
@@ -572,8 +529,8 @@ pub const Block = struct {
         \\>
         \\>back to the outer block
         \\
-        \\A block can optionally wrap a Markdown heading element. In this case  
-        \\the generated Block will be rendered with two separate sub-containers: 
+        \\A block can optionally wrap a Markdown heading element. In this case
+        \\the generated Block will be rendered with two separate sub-containers:
         \\one for the block title and one for the body.
         \\
         \\Example:
@@ -676,17 +633,17 @@ pub const Image = struct {
                 \\
                 \\When both dimensions are non-zero, the image will be resized to exactly those dimensions:
                 \\```markdown
-                \\[Image caption]($image.asset('example.jpg').size(800, 600))
+                \\[Image caption]($image.asset('example.jpg').size(800,600))
                 \\```
                 \\
                 \\To specify width while maintaining aspect ratio, set height to 0:
                 \\```markdown
-                \\[Image caption]($image.asset('example.jpg').size(800, 0))
+                \\[Image caption]($image.asset('example.jpg').size(800,0))
                 \\```
                 \\
                 \\To specify height while maintaining aspect ratio, set width to 0:
                 \\```markdown
-                \\[Image caption]($image.asset('example.jpg').size(0, 600))
+                \\[Image caption]($image.asset('example.jpg').size(0,600))
                 \\```
                 \\
             ;
@@ -757,21 +714,64 @@ pub const Video = struct {
     ;
     pub const Builtins = struct {
         pub const loop = utils.directiveBuiltin("loop", .bool,
-            \\If true, the video will seek back to the start upon reaching the 
+            \\If true, the video will seek back to the start upon reaching the
             \\end.
         );
         pub const muted = utils.directiveBuiltin("muted", .bool,
-            \\If true, the video will be silenced at start. 
+            \\If true, the video will be silenced at start.
         );
         pub const autoplay = utils.directiveBuiltin("autoplay", .bool,
-            \\If true, the video will start playing automatically. 
+            \\If true, the video will start playing automatically.
         );
         pub const controls = utils.directiveBuiltin("controls", .bool,
-            \\If true, the video will display controls (e.g. play/pause, volume). 
+            \\If true, the video will display controls (e.g. play/pause, volume).
         );
         pub const pip = utils.directiveBuiltin("pip", .bool,
-            \\If **false**, clients shouldn't try to display the video in a 
+            \\If **false**, clients shouldn't try to display the video in a
             \\Picture-in-Picture context.
+        );
+
+        pub const url = utils.SrcBuiltins.url;
+        pub const asset = utils.SrcBuiltins.asset;
+        pub const siteAsset = utils.SrcBuiltins.siteAsset;
+        pub const buildAsset = utils.SrcBuiltins.buildAsset;
+    };
+};
+
+pub const Audio = struct {
+    src: ?Src = null,
+    loop: ?bool = null,
+    muted: ?bool = null,
+    autoplay: ?bool = null,
+    hide_controls: ?bool = null,
+
+    pub const mandatory = .{.src};
+    pub const directive_mandatory = .{};
+    pub const description =
+        \\An embedded audio file.
+        \\
+        \\Any text placed between `[]` will be used as a caption for the audio
+        \\file.
+        \\
+        \\Example:
+        \\```markdown
+        \\[This is the caption]($audio.asset('foo.wav'))
+        \\```
+    ;
+    pub const Builtins = struct {
+        pub const loop = utils.directiveBuiltin("loop", .bool,
+            \\If true, the audio file will seek back to the start upon reaching
+            \\the end.
+        );
+        pub const muted = utils.directiveBuiltin("muted", .bool,
+            \\If true, the audio file will be silenced at start.
+        );
+        pub const autoplay = utils.directiveBuiltin("autoplay", .bool,
+            \\If true, the audio file will start playing automatically.
+        );
+        pub const hide_controls = utils.directiveBuiltin("hide_controls", .bool,
+            \\If true, the audio file will hide its controls (e.g. play/pause,
+            \\volume).
         );
 
         pub const url = utils.SrcBuiltins.url;
@@ -816,11 +816,12 @@ pub const Link = struct {
         pub const asset = utils.SrcBuiltins.asset;
         pub const siteAsset = utils.SrcBuiltins.siteAsset;
         pub const buildAsset = utils.SrcBuiltins.buildAsset;
+        pub const site = utils.SrcBuiltins.site;
         pub const page = utils.SrcBuiltins.page;
         pub const sibling = utils.SrcBuiltins.sibling;
         pub const sub = utils.SrcBuiltins.sub;
         pub const new = utils.directiveBuiltin("new", .bool,
-            \\When `true` it asks readers to open the link in a new window or 
+            \\When `true` it asks readers to open the link in a new window or
             \\tab.
         );
         pub const alternative = struct {
@@ -833,7 +834,7 @@ pub const Link = struct {
                 \\alternative version of the page, which can be particularly
                 \\useful when referencing the RSS feed version of a page.
                 \\
-                \\The string argument is the name of an alrenative as defined 
+                \\The string argument is the name of an alrenative as defined
                 \\in the page's `alternatives` frontmatter property.
             ;
 
@@ -871,11 +872,11 @@ pub const Link = struct {
                 \\directive that specifies an `id`) of either the current
                 \\page or a target page set with `page()`.
                 \\
-                \\Zine tracks all ids defined in content files so referencing 
+                \\Zine tracks all ids defined in content files so referencing
                 \\an id that doesn't exist will result in a build error.
                 \\
-                \\Zine does not track ids defined inside of templates so 
-                \\use `unsafeRef` to deep-link to those. 
+                \\Zine does not track ids defined inside of templates so
+                \\use `unsafeRef` to deep-link to those.
             ;
 
             pub fn call(
@@ -911,7 +912,7 @@ pub const Link = struct {
             pub const description =
                 \\Like `ref` but Zine will not perform any id checking.
                 \\
-                \\Can be used to deep-link to ids specified in templates. 
+                \\Can be used to deep-link to ids specified in templates.
             ;
 
             pub fn call(
@@ -982,7 +983,7 @@ pub const Code = struct {
                 \\ The second argument is inclusive.
                 \\
                 \\ ```
-                \\ []($code.asset("main.zig").lines(10, 15))
+                \\ []($code.asset("main.zig").lines(10,15))
                 \\ ```
                 \\ This will include only lines 10 - 15 from the main.zig asset file.
             ;
